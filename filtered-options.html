@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InBerlinWohnen Filtered Results</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 2rem;
+      line-height: 1.4;
+      max-width: 980px;
+      margin-inline: auto;
+    }
+    .meta { margin-bottom: 1rem; color: #555; }
+    .controls {
+      display: flex;
+      gap: .75rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+    button {
+      border: 1px solid #999;
+      border-radius: .4rem;
+      padding: .5rem .9rem;
+      cursor: pointer;
+      background: transparent;
+    }
+    .status {
+      padding: .65rem .8rem;
+      border-radius: .4rem;
+      margin-bottom: 1rem;
+      background: #eef4ff;
+      border: 1px solid #bfd3ff;
+    }
+    .error {
+      background: #ffecec;
+      border-color: #ffb3b3;
+    }
+    .listings {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+    .card {
+      border: 1px solid #ccc;
+      border-radius: .5rem;
+      padding: .8rem;
+      background: color-mix(in srgb, Canvas 93%, transparent);
+    }
+    .card h3 { margin-top: 0; font-size: 1rem; }
+    .tag {
+      display: inline-block;
+      padding: .15rem .45rem;
+      border: 1px solid #8ab;
+      border-radius: 99px;
+      margin-right: .4rem;
+      margin-bottom: .35rem;
+      font-size: .8rem;
+    }
+    code { word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>Wohnungsfinder: Selected Options Only</h1>
+  <p class="meta">
+    Source: <a href="https://www.inberlinwohnen.de/wohnungsfinder/?page=1" target="_blank" rel="noopener noreferrer">inberlinwohnen.de/wohnungsfinder</a><br />
+    Applied filters: <strong>WBS: erforderlich</strong> and <strong>Wohnfläche: under 55 m²</strong>.
+  </p>
+
+  <div class="controls">
+    <button id="reloadBtn">Reload listings</button>
+  </div>
+
+  <div id="status" class="status">Loading…</div>
+  <div id="listings" class="listings"></div>
+
+  <script>
+    const SOURCE_URL = 'https://www.inberlinwohnen.de/wohnungsfinder/?page=1';
+    const CORS_FALLBACKS = [
+      url => url,
+      url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+      url => `https://corsproxy.io/?${encodeURIComponent(url)}`
+    ];
+
+    const statusEl = document.getElementById('status');
+    const listingsEl = document.getElementById('listings');
+    const reloadBtn = document.getElementById('reloadBtn');
+
+    const areaRegex = /(\d+(?:[.,]\d+)?)\s*(?:m²|qm|m2)/i;
+
+    const sanitizeNumber = value => Number(String(value).replace(',', '.'));
+
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.classList.toggle('error', isError);
+    }
+
+    function looksLikeWbsRequired(text) {
+      const lc = text.toLowerCase();
+      return (
+        lc.includes('wbs erforderlich') ||
+        lc.includes('wbs: erforderlich') ||
+        lc.includes('wbs nötig') ||
+        lc.includes('wbs notwendig')
+      );
+    }
+
+    function parseListings(htmlText) {
+      const doc = new DOMParser().parseFromString(htmlText, 'text/html');
+
+      const candidateSelectors = [
+        '.property', '.wohnung', '.offer', '.listing', '.immobilie',
+        '.teaser', '.card', 'article', '.property-item', '.list-item'
+      ];
+
+      const nodes = candidateSelectors
+        .flatMap(selector => Array.from(doc.querySelectorAll(selector)))
+        .filter((node, idx, arr) => arr.findIndex(n => n === node) === idx)
+        .filter(node => node.textContent && node.textContent.trim().length > 20);
+
+      const extracted = nodes.map(node => {
+        const text = node.textContent.replace(/\s+/g, ' ').trim();
+        const areaMatch = text.match(areaRegex);
+        const area = areaMatch ? sanitizeNumber(areaMatch[1]) : null;
+        const linkNode = node.querySelector('a[href]');
+        const href = linkNode ? new URL(linkNode.getAttribute('href'), SOURCE_URL).href : SOURCE_URL;
+        const title = (node.querySelector('h1,h2,h3,h4,strong')?.textContent || 'Wohnung').trim();
+        return { title, text, area, href };
+      });
+
+      return extracted.filter(item => looksLikeWbsRequired(item.text) && item.area !== null && item.area < 55);
+    }
+
+    async function fetchSourceHtml() {
+      let lastError;
+
+      for (const makeUrl of CORS_FALLBACKS) {
+        const url = makeUrl(SOURCE_URL);
+        try {
+          const res = await fetch(url, { headers: { 'accept': 'text/html' } });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const text = await res.text();
+          if (text.length < 100) throw new Error('Unexpectedly short response');
+          return text;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+
+      throw lastError || new Error('Could not fetch source page.');
+    }
+
+    function renderListings(items) {
+      listingsEl.innerHTML = '';
+      if (!items.length) {
+        setStatus('No matching listings found right now for WBS erforderlich and area < 55 m².');
+        return;
+      }
+
+      setStatus(`Found ${items.length} matching listing(s).`);
+      items.forEach(item => {
+        const card = document.createElement('article');
+        card.className = 'card';
+        card.innerHTML = `
+          <h3>${item.title}</h3>
+          <div>
+            <span class="tag">WBS erforderlich</span>
+            <span class="tag">${item.area} m²</span>
+          </div>
+          <p>${item.text.slice(0, 250)}${item.text.length > 250 ? '…' : ''}</p>
+          <a href="${item.href}" target="_blank" rel="noopener noreferrer">Open listing</a>
+        `;
+        listingsEl.appendChild(card);
+      });
+    }
+
+    async function load() {
+      setStatus('Loading listings from source page…');
+      listingsEl.innerHTML = '';
+      try {
+        const html = await fetchSourceHtml();
+        const filtered = parseListings(html);
+        renderListings(filtered);
+      } catch (err) {
+        setStatus(`Failed to load listings. ${err.message}. You can open source manually: ${SOURCE_URL}`, true);
+      }
+    }
+
+    reloadBtn.addEventListener('click', load);
+    load();
+  </script>
+</body>
+</html>
